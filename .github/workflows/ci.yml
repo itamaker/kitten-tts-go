@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build & Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Opus encoding is compiled in via cgo. The hraban/opus binding links both
+      # libopus and libopusfile (#cgo pkg-config: opus opusfile), so both dev
+      # packages plus pkg-config are required at build time. espeak-ng is the
+      # runtime phonemizer.
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopus-dev libopusfile-dev pkg-config espeak-ng
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install opus opusfile pkg-config espeak-ng
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::The following files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build -o bin/ ./...
+
+      - name: Test
+        run: go test -v -race ./...

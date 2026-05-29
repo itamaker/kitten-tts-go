@@ -1,0 +1,65 @@
+# GoReleaser configuration.
+#
+# This project links libopus via cgo, so binaries must be built natively on each
+# target OS/arch (cross-compiling cgo to macOS in CI is impractical). The release
+# workflow therefore runs `goreleaser build --single-target` on a matrix of
+# native runners and publishes the archives itself.
+#
+# The archives/checksum/release sections below are used for local dry runs
+# (`goreleaser release --snapshot --clean`) and document the intended release
+# layout; CI packages the per-runner binaries to match.
+version: 2
+
+project_name: kitten-tts-go
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: kitten-tts
+    main: ./cmd/kitten-tts
+    binary: kitten-tts
+    env:
+      - CGO_ENABLED=1
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+
+  - id: kitten-tts-server
+    main: ./cmd/kitten-tts-server
+    binary: kitten-tts-server
+    env:
+      - CGO_ENABLED=1
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+
+archives:
+  - id: default
+    ids:
+      - kitten-tts
+      - kitten-tts-server
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  github:
+    owner: itamaker
+    name: kitten-tts-go

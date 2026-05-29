@@ -1,0 +1,10 @@
+/bin/
+/dist/
+/models/
+*.tar.gz
+*.wav
+*.mp3
+*.flac
+*.pcm
+*.ogg
+*.opus
