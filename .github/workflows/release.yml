@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # full history so GoReleaser can derive the version
+          fetch-depth: 0 # full history (tags) for version derivation
 
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
@@ -52,11 +52,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - uses: goreleaser/goreleaser-action@v6
-        with:
-          version: "~> v2"
-          install-only: true
 
       # Build libogg + libopus + opusfile as static-only libraries into a private
       # prefix. With no shared libraries in the prefix, the linker is forced to
@@ -101,6 +96,11 @@ jobs:
           echo "prefix=$PREFIX" >> "$GITHUB_OUTPUT"
           echo "pkgconfig=$wrapper" >> "$GITHUB_OUTPUT"
 
+      # Build with `go build` directly (not goreleaser): goreleaser spawns the
+      # compiler in a sanitized environment that drops PKG_CONFIG/PKG_CONFIG_PATH,
+      # so cgo's pkg-config would miss our static opus prefix and fall back to a
+      # system opus (the cause of the earlier "ld: cannot find -lopus"). Running
+      # `go build` in this shell guarantees the env reaches cgo.
       - name: Build (static cgo)
         shell: bash
         env:
@@ -114,7 +114,10 @@ jobs:
           if [ "${{ matrix.cross }}" = "true" ]; then
             export CC="clang -arch x86_64"
           fi
-          goreleaser build --single-target --clean
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o dist/kitten-tts ./cmd/kitten-tts
+          go build -trimpath -ldflags "-s -w" -o dist/kitten-tts-server ./cmd/kitten-tts-server
+          file dist/* || true
 
       - name: Package archive
         run: |

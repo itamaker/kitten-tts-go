@@ -1,13 +1,14 @@
 # GoReleaser configuration.
 #
 # This project links libopus via cgo. The release workflow builds libopus/
-# libopusfile as static libraries and statically links them, which lets it run
-# `goreleaser build --single-target` per target — building linux natively and
-# cross-compiling darwin/amd64 on the Apple Silicon runner (clang -arch x86_64).
-# The opus prefix and pkg-config/CC env are provided by the workflow.
+# libopusfile as static libraries and statically links them, building linux
+# natively and cross-compiling darwin/amd64 on the Apple Silicon runner
+# (clang -arch x86_64).
 #
-# The archives/checksum/release sections below are used for local dry runs
-# (`goreleaser release --snapshot --clean`) and document the intended release
+# CI builds the binaries with `go build` directly (goreleaser spawns the
+# compiler in a sanitized env that drops PKG_CONFIG_PATH, which broke the static
+# opus link). This file is kept for local dry runs
+# (`goreleaser release --snapshot --clean`) and documents the intended release
 # layout; CI packages the per-runner binaries to match.
 version: 2
 
