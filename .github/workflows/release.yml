@@ -7,10 +7,20 @@ on:
 permissions:
   contents: write
 
+# libopus/libopusfile are the only link-time native dependency (ONNX is dlopen'd,
+# espeak-ng is exec'd). We build them as static x86_64/arm64 libraries from source
+# and statically link them into the binaries, so releases are self-contained: the
+# target machine needs only the ONNX Runtime shared library and espeak-ng.
+#
+# Because the opus stack is statically linked, darwin/amd64 is cross-compiled on
+# the Apple Silicon runner (clang is a universal toolchain) instead of waiting on
+# the scarce Intel macOS runners.
+env:
+  OGG_VERSION: "1.3.5"
+  OPUS_VERSION: "1.5.2"
+  OPUSFILE_VERSION: "0.12"
+
 jobs:
-  # Build natively on each target OS/arch. The project links libopus via cgo, so
-  # each runner builds only its own platform with `goreleaser build
-  # --single-target` (cross-compiling cgo to macOS in CI is impractical).
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     runs-on: ${{ matrix.runner }}
@@ -18,25 +28,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-latest, goos: linux, goarch: amd64 }
-          - { runner: ubuntu-24.04-arm, goos: linux, goarch: arm64 }
-          - { runner: macos-13, goos: darwin, goarch: amd64 }
-          - { runner: macos-latest, goos: darwin, goarch: arm64 }
+          - { runner: ubuntu-latest, goos: linux, goarch: amd64, cross: false }
+          - { runner: ubuntu-24.04-arm, goos: linux, goarch: arm64, cross: false }
+          # darwin/amd64 is cross-compiled on the arm64 runner (clang -arch x86_64).
+          - { runner: macos-latest, goos: darwin, goarch: amd64, cross: true }
+          - { runner: macos-latest, goos: darwin, goarch: arm64, cross: false }
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0 # full history so GoReleaser can derive the version
 
-      # hraban/opus links libopus + libopusfile (#cgo pkg-config: opus opusfile).
-      - name: Install libopus (Linux)
+      - name: Install build tools (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopus-dev libopusfile-dev pkg-config
+          sudo apt-get install -y build-essential pkg-config
 
-      - name: Install libopus (macOS)
+      - name: Install build tools (macOS)
         if: runner.os == 'macOS'
-        run: brew install opus opusfile pkg-config
+        run: brew install pkg-config
 
       - uses: actions/setup-go@v5
         with:
@@ -48,10 +58,63 @@ jobs:
           version: "~> v2"
           install-only: true
 
-      - name: Build (cgo, native target)
+      # Build libogg + libopus + opusfile as static-only libraries into a private
+      # prefix. With no shared libraries in the prefix, the linker is forced to
+      # link them statically. opusfile's HTTP support is disabled to drop the
+      # OpenSSL/libcurl dependency.
+      - name: Build static libopus/libopusfile
+        id: opus
+        shell: bash
+        run: |
+          set -euxo pipefail
+          PREFIX="$RUNNER_TEMP/opusprefix"
+          SRC="$RUNNER_TEMP/opussrc"
+          mkdir -p "$PREFIX" "$SRC"
+
+          conf=(--prefix="$PREFIX" --enable-static --disable-shared --disable-dependency-tracking)
+          export CFLAGS="-fPIC"
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            export CC="clang -arch x86_64"
+            export CFLAGS="-arch x86_64 -fPIC"
+            export LDFLAGS="-arch x86_64"
+            conf+=(--host=x86_64-apple-darwin)
+          fi
+          export PKG_CONFIG_PATH="$PREFIX/lib/pkgconfig"
+          jobs="$(getconf _NPROCESSORS_ONLN)"
+
+          cd "$SRC"
+          curl -fsSL "https://downloads.xiph.org/releases/ogg/libogg-${OGG_VERSION}.tar.gz" | tar xz
+          (cd "libogg-${OGG_VERSION}" && ./configure "${conf[@]}" && make -j"$jobs" && make install)
+
+          curl -fsSL "https://downloads.xiph.org/releases/opus/opus-${OPUS_VERSION}.tar.gz" | tar xz
+          (cd "opus-${OPUS_VERSION}" && ./configure "${conf[@]}" && make -j"$jobs" && make install)
+
+          curl -fsSL "https://downloads.xiph.org/releases/opus/opusfile-${OPUSFILE_VERSION}.tar.gz" | tar xz
+          (cd "opusfile-${OPUSFILE_VERSION}" && ./configure "${conf[@]}" --disable-http --disable-examples --disable-doc && make -j"$jobs" && make install)
+
+          # cgo runs $PKG_CONFIG verbatim and does not split arguments, so wrap
+          # pkg-config to always request the transitive static libs (e.g. -logg).
+          wrapper="$RUNNER_TEMP/pkg-config-static"
+          printf '#!/bin/sh\nexec pkg-config --static "$@"\n' > "$wrapper"
+          chmod +x "$wrapper"
+
+          echo "prefix=$PREFIX" >> "$GITHUB_OUTPUT"
+          echo "pkgconfig=$wrapper" >> "$GITHUB_OUTPUT"
+
+      - name: Build (static cgo)
+        shell: bash
         env:
           CGO_ENABLED: "1"
-        run: goreleaser build --single-target --clean
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          PKG_CONFIG: ${{ steps.opus.outputs.pkgconfig }}
+          PKG_CONFIG_PATH: ${{ steps.opus.outputs.prefix }}/lib/pkgconfig
+        run: |
+          set -euxo pipefail
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            export CC="clang -arch x86_64"
+          fi
+          goreleaser build --single-target --clean
 
       - name: Package archive
         run: |

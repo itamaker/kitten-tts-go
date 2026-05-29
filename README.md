@@ -64,9 +64,10 @@ brew install opus opusfile pkg-config
 sudo apt-get install -y libopus-dev libopusfile-dev pkg-config
 ```
 
-> Released binaries dynamically link libopus/libopusfile and `dlopen` the ONNX
-> Runtime, so they are **not** fully self-contained — the target machine still
-> needs libopus, libopusfile, the ONNX Runtime shared library, and espeak-ng.
+> The libopus/libopusfile/pkg-config packages above are only needed when
+> **building from source**. The **released binaries statically link** libopus and
+> libopusfile, so the target machine needs only the ONNX Runtime shared library
+> (`dlopen`'d at runtime) and espeak-ng — no opus libraries required.
 
 ## Available Models
 
