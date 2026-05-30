@@ -17,7 +17,7 @@
 #
 # Environment:
 #   KITTEN_BIN_DIR   Use prebuilt binaries from this dir instead of `go build`
-#                    (e.g. point it at release/goreleaser output).
+#                    (e.g. point it at an extracted release tarball).
 #   KEEP=1           Keep the temporary output directory for inspection.
 #   PORT=NNNN        Server port (default: 8137).
 #
