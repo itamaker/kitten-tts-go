@@ -1,6 +1,10 @@
 # kitten-tts-go 🐱🐹
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/itamaker/kitten-tts-go/blob/main/kitten-tts-go-colab.ipynb)
+
 Go implementation of [KittenTTS](https://github.com/KittenML/KittenTTS) — an ultra-lightweight ONNX-based text-to-speech engine. Self-contained binaries with no Python dependency.
+
+> **Try it now:** the [Colab notebook](kitten-tts-go-colab.ipynb) builds the project and synthesizes speech in three clicks — no local setup, no GPU.
 
 It produces two binaries:
 
