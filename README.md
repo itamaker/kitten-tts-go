@@ -115,21 +115,21 @@ go build -o bin/ ./...
 ### Releases
 
 Pushing a `v*` tag triggers [`.github/workflows/release.yml`](.github/workflows/release.yml),
-which builds binaries on native runners (Linux amd64/arm64, macOS amd64/arm64) with
-[GoReleaser](https://goreleaser.com) and publishes a GitHub Release with one
-`.tar.gz` per platform plus `checksums.txt`:
+which builds the binaries with `go build` on GitHub runners and publishes a
+GitHub Release with one `.tar.gz` per platform plus `checksums.txt`:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
-Because the project links libopus via cgo, each platform is built **natively**
-(`goreleaser build --single-target`) rather than cross-compiled. You can dry-run the
-build locally with:
+libopus/libopusfile are statically linked from source, so each target is built on
+its own native runner — Linux amd64/arm64 and macOS arm64 — except darwin/amd64,
+which is cross-compiled on the Apple Silicon runner (clang is a universal
+toolchain). To build locally:
 
 ```bash
-goreleaser build --single-target --snapshot --clean
+go build -o bin/ ./...
 ```
 
 ### End-to-end smoke test
