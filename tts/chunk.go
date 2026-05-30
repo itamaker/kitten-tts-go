@@ -19,7 +19,7 @@ var (
 // sentences.
 func ChunkText(text string, maxLen int) []string {
 	var chunks []string
-	for _, sentence := range reSentence.Split(text, -1) {
+	for _, sentence := range splitSentences(text) {
 		sentence = strings.TrimSpace(sentence)
 		if sentence == "" {
 			continue
@@ -49,6 +49,24 @@ func ChunkText(text string, maxLen int) []string {
 		}
 	}
 	return chunks
+}
+
+// splitSentences breaks text on .!? boundaries while keeping the terminating
+// punctuation attached to each sentence. This matters because the model uses
+// final punctuation as a prosody cue and pads trailing silence accordingly;
+// dropping it (as regexp.Split does) yields a comma instead, which clips the
+// end of speech once trailing silence is trimmed. Matches the reference model.
+func splitSentences(text string) []string {
+	var out []string
+	start := 0
+	for _, loc := range reSentence.FindAllStringIndex(text, -1) {
+		out = append(out, text[start:loc[1]])
+		start = loc[1]
+	}
+	if start < len(text) {
+		out = append(out, text[start:])
+	}
+	return out
 }
 
 // ChunkTextStreaming splits text for streaming synthesis: the first chunk ends

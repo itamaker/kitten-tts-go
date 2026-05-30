@@ -94,3 +94,26 @@ func TestPhonemizerInterface(t *testing.T) {
 		t.Errorf("expected framed token IDs, got %v", ids)
 	}
 }
+
+func TestChunkTextKeepsSentencePunctuation(t *testing.T) {
+	chunks := ChunkText("Hello, world! This is a test.", 400)
+	if len(chunks) != 2 {
+		t.Fatalf("got %d chunks, want 2: %q", len(chunks), chunks)
+	}
+	// Terminal punctuation must survive (not be replaced by a comma), or the
+	// model produces comma prosody and the trailing-silence trim clips the end.
+	if !strings.HasSuffix(chunks[0], "!") {
+		t.Errorf("chunk[0] = %q, want it to end with '!'", chunks[0])
+	}
+	if !strings.HasSuffix(chunks[1], ".") {
+		t.Errorf("chunk[1] = %q, want it to end with '.'", chunks[1])
+	}
+}
+
+func TestChunkTextAppendsCommaWhenUnpunctuated(t *testing.T) {
+	// A trailing fragment with no sentence punctuation still gets a comma cue.
+	chunks := ChunkText("just some words", 400)
+	if len(chunks) != 1 || !strings.HasSuffix(chunks[0], ",") {
+		t.Fatalf("got %q, want a single comma-terminated chunk", chunks)
+	}
+}
