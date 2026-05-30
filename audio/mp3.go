@@ -34,7 +34,12 @@ func encodeMP3(samples []float32) ([]byte, error) {
 	resampled := Resample(samples, SampleRate, mp3Rate)
 
 	frames := (len(resampled) + framedSamples - 1) / framedSamples
-	stereo := make([]int16, frames*framedSamples*2) // zero-padded tail = silence
+	n := frames * framedSamples * 2
+	// Over-allocate one frame of capacity: shine-mp3 reads a sample or two past
+	// the final frame via unsafe pointer arithmetic. The extra (zeroed) capacity
+	// keeps that read inside the allocation, which also satisfies the race
+	// detector's checkptr (it otherwise aborts with "bad pointer in Go heap").
+	stereo := make([]int16, n, n+framedSamples*2)
 	for i, s := range resampled {
 		v := floatToI16(s)
 		stereo[2*i], stereo[2*i+1] = v, v
