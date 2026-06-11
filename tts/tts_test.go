@@ -183,21 +183,30 @@ func TestTrimTrailingSilence(t *testing.T) {
 	}{
 		// Long padding (sentence prosody): trim capped at trailingSilence.
 		{"long padding capped at 5000", 24000, 8000, 24000 + 8000 - trailingSilence},
-		// Short padding (comma prosody): only the quiet tail goes, minus the
-		// decay margin — audible samples must never be cut.
-		{"short padding trims only silence", 24000, 1000, 24000 + 240},
+		// Short padding (comma prosody): everything within the decay margin is
+		// kept — audible samples must never be cut.
+		{"padding within margin kept", 24000, 1000, 24000 + 1000},
+		{"long padding keeps decay margin", 24000, 3000, 24000 + 1200},
 		{"no padding trims nothing", 24000, 0, 24000},
-		{"padding shorter than margin", 24000, 100, 24000 + 100},
-		{"all silence", 0, 3000, 240},
+		{"all silence", 0, 3000, 1200},
 	}
 	for _, c := range cases {
 		got := trimTrailingSilence(synthTail(c.loud, c.quiet))
 		if len(got) != c.want {
 			t.Errorf("%s: got len %d, want %d", c.name, len(got), c.want)
 		}
-		// The last loud sample must always survive.
-		if c.loud > 0 && len(got) < c.loud {
-			t.Errorf("%s: trimmed into audible audio (len %d < %d)", c.name, len(got), c.loud)
+		// The last loud sample must always survive at full amplitude (the
+		// fade must stay inside the quiet tail).
+		if c.loud > 0 {
+			if len(got) < c.loud {
+				t.Errorf("%s: trimmed into audible audio (len %d < %d)", c.name, len(got), c.loud)
+			} else if got[c.loud-1] != 0.5 {
+				t.Errorf("%s: faded audible audio (sample = %v)", c.name, got[c.loud-1])
+			}
+		}
+		// A kept quiet tail must fade out to avoid a click at the cut.
+		if c.quiet > 0 && got[len(got)-1] >= 0.001 {
+			t.Errorf("%s: tail not faded (last sample = %v)", c.name, got[len(got)-1])
 		}
 	}
 }

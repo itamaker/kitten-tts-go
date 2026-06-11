@@ -113,15 +113,19 @@ func (m *Model) GenerateChunk(text, voice string, speed float32) ([]float32, err
 }
 
 // trimTrailingSilence removes the silence the model pads after the final word.
-// The reference model cuts a fixed 5000 samples, but the padding is only that
-// long after sentence-final punctuation — comma-terminated chunks (short
-// inputs, streaming splits) pad far less, and a fixed cut chops real speech.
-// So trim at most trailingSilence samples, stopping at the last audible sample
-// plus a short decay margin.
+// It may attenuate the tail of audio in place.
+//
+// The reference model cuts a fixed 5000 samples, but that cut lands mid-decay:
+// the padding is only that long after sentence-final punctuation, and even
+// there the word's fade-out extends into the cut region — comma-terminated
+// chunks (short inputs, streaming splits) pad far less and lose real speech.
+// So trim at most trailingSilence samples, stop a decay margin after the last
+// audible sample, and fade the kept quiet tail so the ending doesn't click.
 func trimTrailingSilence(audio []float32) []float32 {
 	const (
 		threshold = 0.02 // peak amplitude below this counts as trailing silence
-		margin    = 240  // keep ~10 ms of decay after the last audible sample
+		margin    = 1200 // keep ~50 ms of decay after the last audible sample
+		fadeLen   = 240  // ~10 ms fade to zero at the cut to avoid a click
 	)
 	quiet := 0
 	for quiet < len(audio) {
@@ -131,7 +135,15 @@ func trimTrailingSilence(audio []float32) []float32 {
 		}
 		quiet++
 	}
-	return audio[:len(audio)-min(trailingSilence, max(quiet-margin, 0))]
+	out := audio[:len(audio)-min(trailingSilence, max(quiet-margin, 0))]
+
+	// Fade only within the quiet tail — never soften audible speech.
+	if n := min(fadeLen, quiet, len(out)); n > 0 {
+		for i := 0; i < n; i++ {
+			out[len(out)-1-i] *= float32(i+1) / float32(n+1)
+		}
+	}
+	return out
 }
 
 // Voices returns the friendly names of every built-in voice.
