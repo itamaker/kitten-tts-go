@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 )
@@ -159,5 +160,79 @@ func TestParseNpyF32Malformed(t *testing.T) {
 		if _, err := parseNpyF32(data); err == nil {
 			t.Errorf("%s: expected an error, got none", name)
 		}
+	}
+}
+
+// synthTail builds a signal: n loud samples followed by m quiet ones.
+func synthTail(loud, quiet int) []float32 {
+	s := make([]float32, loud+quiet)
+	for i := 0; i < loud; i++ {
+		s[i] = 0.5
+	}
+	for i := loud; i < len(s); i++ {
+		s[i] = 0.001
+	}
+	return s
+}
+
+func TestTrimTrailingSilence(t *testing.T) {
+	cases := []struct {
+		name        string
+		loud, quiet int
+		want        int // expected output length
+	}{
+		// Long padding (sentence prosody): trim capped at trailingSilence.
+		{"long padding capped at 5000", 24000, 8000, 24000 + 8000 - trailingSilence},
+		// Short padding (comma prosody): only the quiet tail goes, minus the
+		// decay margin — audible samples must never be cut.
+		{"short padding trims only silence", 24000, 1000, 24000 + 240},
+		{"no padding trims nothing", 24000, 0, 24000},
+		{"padding shorter than margin", 24000, 100, 24000 + 100},
+		{"all silence", 0, 3000, 240},
+	}
+	for _, c := range cases {
+		got := trimTrailingSilence(synthTail(c.loud, c.quiet))
+		if len(got) != c.want {
+			t.Errorf("%s: got len %d, want %d", c.name, len(got), c.want)
+		}
+		// The last loud sample must always survive.
+		if c.loud > 0 && len(got) < c.loud {
+			t.Errorf("%s: trimmed into audible audio (len %d < %d)", c.name, len(got), c.loud)
+		}
+	}
+}
+
+// TestGenerateChunkKeepsAudibleTail is an end-to-end regression for the bug
+// where the fixed 5000-sample trim chopped the end of comma-terminated speech
+// ("Hello world," pads only ~400 quiet samples). Needs a local model.
+func TestGenerateChunkKeepsAudibleTail(t *testing.T) {
+	dir := "../models/kitten-tts-nano-int8"
+	if _, err := os.Stat(dir); err != nil {
+		t.Skip("no local model")
+	}
+	m, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+
+	audio, err := m.GenerateChunk("Hello world,", "Bruno", 1.0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The final 100 ms must still contain audible speech/decay; the old fixed
+	// trim left a tail that was already cut mid-word.
+	tail := audio[len(audio)-2400:]
+	var peak float32
+	for _, s := range tail {
+		if s > peak {
+			peak = s
+		}
+		if -s > peak {
+			peak = -s
+		}
+	}
+	if peak < 0.01 {
+		t.Errorf("tail peak %v: end of speech appears trimmed away", peak)
 	}
 }

@@ -109,8 +109,29 @@ func (m *Model) GenerateChunk(text, voice string, speed float32) ([]float32, err
 		return nil, err
 	}
 
-	// Trim trailing silence (last 5000 samples, matching the reference model).
-	return audio[:len(audio)-min(trailingSilence, len(audio))], nil
+	return trimTrailingSilence(audio), nil
+}
+
+// trimTrailingSilence removes the silence the model pads after the final word.
+// The reference model cuts a fixed 5000 samples, but the padding is only that
+// long after sentence-final punctuation — comma-terminated chunks (short
+// inputs, streaming splits) pad far less, and a fixed cut chops real speech.
+// So trim at most trailingSilence samples, stopping at the last audible sample
+// plus a short decay margin.
+func trimTrailingSilence(audio []float32) []float32 {
+	const (
+		threshold = 0.02 // peak amplitude below this counts as trailing silence
+		margin    = 240  // keep ~10 ms of decay after the last audible sample
+	)
+	quiet := 0
+	for quiet < len(audio) {
+		s := audio[len(audio)-1-quiet]
+		if s > threshold || s < -threshold {
+			break
+		}
+		quiet++
+	}
+	return audio[:len(audio)-min(trailingSilence, max(quiet-margin, 0))]
 }
 
 // Voices returns the friendly names of every built-in voice.

@@ -65,7 +65,7 @@ Two packages do the work; `cmd/` is thin glue.
 - **CLI flags go before positional args.** Both binaries use the stdlib `flag` package; the positional `<model_dir> <text> [voice]` must come *after* all flags, or flags are swallowed as positionals.
 - **The `tts` library never logs.** `New` stays silent by design (`load.go`); wire your own logging around it. The `cmd/` binaries do the logging.
 - **Voice names are mapped twice.** The server maps OpenAI names (alloy/echo/…) to KittenTTS names (Bella/Jasper/…) in `handlers.go`; the engine then resolves friendly names to internal `expr-voice-*` IDs via `ResolveVoiceName`. Unknown names pass through to let the engine resolve them directly.
-- **Trailing silence is trimmed** (last 5000 samples) to match the reference model; chunking deliberately *preserves* terminal sentence punctuation so prosody isn't clipped (see `TestChunkTextKeepsSentencePunctuation` for the why).
+- **Trailing silence is trimmed** — up to 5000 samples (the reference model's fixed cut), but never past the last audible sample: comma-terminated chunks pad far less than 5000, and a fixed cut chops speech (see `trimTrailingSilence` in `tts.go`). Chunking deliberately *preserves* terminal sentence punctuation so prosody isn't clipped (see `TestChunkTextKeepsSentencePunctuation` for the why).
 - **SSE streaming** requires `response_format: "pcm"`; it uses `ChunkTextStreaming` (small first chunk for fast time-to-first-audio) rather than `ChunkText`.
 
 ## Releases
