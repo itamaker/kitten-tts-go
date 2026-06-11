@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"strings"
@@ -10,6 +11,10 @@ import (
 	"github.com/itamaker/kitten-tts-go/audio"
 	"github.com/itamaker/kitten-tts-go/tts"
 )
+
+// maxRequestBody caps the request body size; speech inputs are short text, so
+// 1 MiB is generous while keeping oversized payloads from tying up the server.
+const maxRequestBody = 1 << 20
 
 // writeError renders an OpenAI-style JSON error body.
 func writeError(w http.ResponseWriter, status int, message string) {
@@ -69,7 +74,7 @@ func mapVoice(voice string) string {
 
 func (s *server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 	req := speechRequest{ResponseFormat: "mp3", Speed: 1.0}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBody)).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
@@ -116,7 +121,11 @@ func (s *server) speechFull(w http.ResponseWriter, input, voice string, speed fl
 	samples, err := s.model.Generate(input, voice, speed, true)
 	s.mu.Unlock()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		status := http.StatusInternalServerError
+		if errors.Is(err, tts.ErrUnknownVoice) {
+			status = http.StatusBadRequest
+		}
+		writeError(w, status, err.Error())
 		return
 	}
 
@@ -154,11 +163,13 @@ func (s *server) speechStream(w http.ResponseWriter, input, voice string, speed 
 	chunks := tts.ChunkTextStreaming(tts.Normalize(input), 100, 400)
 	log.Printf("streaming %d chunks", len(chunks))
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	for i, chunk := range chunks {
+		// Lock per chunk (not for the whole stream) so other requests can
+		// interleave with a long-running stream; the session itself is the
+		// only shared state.
+		s.mu.Lock()
 		samples, err := s.model.GenerateChunk(chunk, voice, speed)
+		s.mu.Unlock()
 		if err != nil {
 			sendEvent(map[string]any{
 				"type":  "error",

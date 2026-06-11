@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/itamaker/kitten-tts-go/tts"
 )
@@ -49,7 +50,16 @@ func main() {
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	log.Printf("listening on http://%s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	// No WriteTimeout: synthesis of long inputs and SSE streams are
+	// intentionally long-lived responses.
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}
 }

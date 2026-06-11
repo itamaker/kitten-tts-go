@@ -39,6 +39,7 @@ func findRuntimeLib() string {
 		"/usr/lib/libonnxruntime.so",             // Linux
 		"/usr/local/lib/libonnxruntime.so",
 		"/usr/lib/x86_64-linux-gnu/libonnxruntime.so",
+		"/usr/lib/aarch64-linux-gnu/libonnxruntime.so",
 	} {
 		if _, err := os.Stat(p); err == nil {
 			return p
@@ -86,6 +87,9 @@ func loadNetwork(path string) (*network, error) {
 		default:
 			roles[i] = roleStyle
 		}
+	}
+	if len(outInfo) == 0 {
+		return nil, fmt.Errorf("tts: model has no outputs")
 	}
 	outNames := make([]string, len(outInfo))
 	for i, info := range outInfo {

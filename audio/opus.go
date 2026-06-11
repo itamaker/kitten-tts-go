@@ -101,7 +101,10 @@ func encodeOpus(samples []float32) ([]byte, error) {
 			return nil, fmt.Errorf("opus encode error: %w", err)
 		}
 		packet := opusOut[:n]
-		granule += frameSize
+		// The final frame is zero-padded to frameSize; the granule position
+		// must count only real samples so players trim the padding (RFC 7845
+		// §4.5 end trimming).
+		granule = min(granule+frameSize, int64(len(samples48k)))
 
 		segs := lacingValues(len(packet))
 		// A page holds at most 255 segments; flush before overflowing.

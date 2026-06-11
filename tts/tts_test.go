@@ -1,6 +1,9 @@
 package tts
 
 import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -115,5 +118,46 @@ func TestChunkTextAppendsCommaWhenUnpunctuated(t *testing.T) {
 	chunks := ChunkText("just some words", 400)
 	if len(chunks) != 1 || !strings.HasSuffix(chunks[0], ",") {
 		t.Fatalf("got %q, want a single comma-terminated chunk", chunks)
+	}
+}
+
+// npyF32 builds a minimal valid NPY v1 payload for a rows×cols float32 array.
+func npyF32(rows, cols int) []byte {
+	header := fmt.Sprintf("{'descr': '<f4', 'fortran_order': False, 'shape': (%d, %d), }", rows, cols)
+	buf := []byte("\x93NUMPY\x01\x00")
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(header)))
+	buf = append(buf, header...)
+	return append(buf, make([]byte, rows*cols*4)...)
+}
+
+func TestParseNpyF32(t *testing.T) {
+	m, err := parseNpyF32(npyF32(3, 2))
+	if err != nil {
+		t.Fatalf("valid NPY: %v", err)
+	}
+	if m.Rows != 3 || m.Cols != 2 || len(m.Data) != 6 {
+		t.Errorf("got %dx%d (%d floats), want 3x2 (6)", m.Rows, m.Cols, len(m.Data))
+	}
+}
+
+// Malformed NPY input must produce an error, never a panic or a bogus Matrix.
+func TestParseNpyF32Malformed(t *testing.T) {
+	valid := npyF32(2, 2)
+	cases := map[string][]byte{
+		"empty":            nil,
+		"bad magic":        []byte("not an npy file"),
+		"truncated header": valid[:12],
+		"truncated data":   valid[:len(valid)-4],
+		"v2 too short":     []byte("\x93NUMPY\x02\x00\xff\xff"),
+		"wrong dtype": func() []byte {
+			b := bytes.Replace(valid, []byte("<f4"), []byte("<f8"), 1)
+			return append(b, make([]byte, 16)...) // pad to f8 size
+		}(),
+		"zero shape": bytes.Replace(valid, []byte("(2, 2)"), []byte("(0, 2)"), 1),
+	}
+	for name, data := range cases {
+		if _, err := parseNpyF32(data); err == nil {
+			t.Errorf("%s: expected an error, got none", name)
+		}
 	}
 }

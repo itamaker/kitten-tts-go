@@ -33,6 +33,7 @@ func (e *ESpeak) Phonemize(text string) (string, error) {
 		"--ipa", "-q",
 		"--sep=", // no separator between phonemes within a word
 		"-v", voice,
+		"--", // text starting with "-" must not be parsed as a flag
 		text,
 	).Output()
 	if err != nil {

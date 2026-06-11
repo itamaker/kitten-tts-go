@@ -43,6 +43,15 @@ func run() error {
 	flag.Parse()
 	args := flag.Args()
 
+	// The voice list is static; don't require (or load) a model for it.
+	if *listVoices {
+		fmt.Println("Available voices:")
+		for _, v := range tts.VoiceNames {
+			fmt.Printf("  %s\n", v)
+		}
+		return nil
+	}
+
 	if len(args) < 1 {
 		usage()
 		return fmt.Errorf("missing model directory")
@@ -53,14 +62,6 @@ func run() error {
 		return err
 	}
 	defer model.Close()
-
-	if *listVoices {
-		fmt.Println("Available voices:")
-		for _, v := range model.Voices() {
-			fmt.Printf("  %s\n", v)
-		}
-		return nil
-	}
 
 	if len(args) < 2 {
 		usage()

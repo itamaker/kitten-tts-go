@@ -113,7 +113,10 @@ func LoadVoices(path string) (map[string]*Matrix, error) {
 	return voices, nil
 }
 
-var reShape = regexp.MustCompile(`'shape':\s*\((\d+),\s*(\d+)\)`)
+var (
+	reShape = regexp.MustCompile(`'shape':\s*\((\d+),\s*(\d+)\)`)
+	reDescr = regexp.MustCompile(`'descr':\s*'([^']+)'`)
+)
 
 // parseNpyF32 is a minimal NPY parser for 2D float32 arrays (little-endian).
 func parseNpyF32(data []byte) (*Matrix, error) {
@@ -131,11 +134,21 @@ func parseNpyF32(data []byte) (*Matrix, error) {
 		headerLen = int(binary.LittleEndian.Uint16(data[8:10]))
 		headerStart = 10
 	} else {
+		if len(data) < 12 {
+			return nil, fmt.Errorf("NPY data too short")
+		}
 		headerLen = int(binary.LittleEndian.Uint32(data[8:12]))
 		headerStart = 12
 	}
+	if headerLen < 0 || len(data)-headerStart < headerLen {
+		return nil, fmt.Errorf("NPY header truncated")
+	}
 
 	header := string(data[headerStart : headerStart+headerLen])
+
+	if d := reDescr.FindStringSubmatch(header); d != nil && d[1] != "<f4" {
+		return nil, fmt.Errorf("unsupported NPY dtype %q (want <f4)", d[1])
+	}
 
 	caps := reShape.FindStringSubmatch(header)
 	if caps == nil {
@@ -143,10 +156,13 @@ func parseNpyF32(data []byte) (*Matrix, error) {
 	}
 	rows, _ := strconv.Atoi(caps[1])
 	cols, _ := strconv.Atoi(caps[2])
+	if rows <= 0 || cols <= 0 {
+		return nil, fmt.Errorf("invalid NPY shape (%d, %d)", rows, cols)
+	}
 
+	// Divide rather than multiply so absurd shapes can't overflow the check.
 	dataStart := headerStart + headerLen
-	expectedBytes := rows * cols * 4
-	if len(data) < dataStart+expectedBytes {
+	if (len(data)-dataStart)/4/cols < rows {
 		return nil, fmt.Errorf("NPY data truncated")
 	}
 

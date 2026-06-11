@@ -165,8 +165,8 @@ Following Go convention, **flags come before the positional arguments**
 # Encode directly to another format with -format
 ./bin/kitten-tts -format mp3 -output hello.mp3 ./models/kitten-tts-nano-int8 'Hello, world!'
 
-# List available voices
-./bin/kitten-tts -list-voices ./models/kitten-tts-nano-int8
+# List available voices (no model directory needed)
+./bin/kitten-tts -list-voices
 ```
 
 CLI flags (single or double dash both work):
@@ -178,7 +178,7 @@ CLI flags (single or double dash both work):
 | `-output`, `-o` | `output.wav` | Output file path |
 | `-format` | `wav` | Output format: `wav`, `mp3`, `flac`, `opus`, `pcm` |
 | `-no-clean` | | Disable text normalization (numbers, currency) |
-| `-list-voices` | | List available voices and exit |
+| `-list-voices` | | List available voices and exit (no model directory needed) |
 
 > Because the CLI uses Go's standard `flag` package, any flag placed *after* a
 > positional argument is treated as a positional. Put flags first.
@@ -214,6 +214,10 @@ curl -X POST http://localhost:8080/v1/audio/speech \
 | `response_format` | string | `"mp3"` | Output audio format (see below) |
 | `speed` | float | `1.0` | Speech speed multiplier (0.25–4.0) |
 | `stream` | bool | `false` | Enable SSE streaming (requires `"pcm"` format) |
+
+Request bodies are capped at 1 MiB. Invalid requests — bad JSON, empty `input`,
+an unknown `voice` or `response_format`, or `speed` out of range — return HTTP
+400 with an OpenAI-style JSON error body.
 
 **Supported audio formats:**
 
