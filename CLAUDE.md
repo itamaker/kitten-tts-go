@@ -36,7 +36,7 @@ Three system dependencies, with **different binding times**:
 
 ### Tests do not need a model or GPU
 
-The unit tests (`tts/tts_test.go`, `audio/mp3_test.go`) cover pure functions — normalization, chunking, token framing, voice resolution, MP3 frame integrity — and substitute a `fakePhonemizer` for the `Phonemizer` interface. They run with no model files and no espeak-ng. For real end-to-end coverage against a downloaded model, use the smoke test instead:
+The unit tests (`tts/tts_test.go`, `audio/mp3_test.go`) cover pure functions — normalization, chunking, token framing, voice resolution, MP3 frame integrity — and substitute a `fakePhonemizer` for the `Phonemizer` interface. They run with no model files and no espeak-ng, with one exception: `TestGenerateChunkKeepsAudibleTail` silently skips unless a model exists at `../models/kitten-tts-nano-int8`, so it turns into a real ONNX regression check as soon as you've run `scripts/fetch_model.sh`. For broader real end-to-end coverage, use the smoke test instead:
 
 ```bash
 scripts/fetch_model.sh nano-int8        # downloads into ./models (git-ignored)
@@ -64,7 +64,7 @@ Two packages do the work; `cmd/` is thin glue.
 
 - **CLI flags go before positional args.** Both binaries use the stdlib `flag` package; the positional `<model_dir> <text> [voice]` must come *after* all flags, or flags are swallowed as positionals.
 - **The `tts` library never logs.** `New` stays silent by design (`load.go`); wire your own logging around it. The `cmd/` binaries do the logging.
-- **Voice names are mapped twice.** The server maps OpenAI names (alloy/echo/…) to KittenTTS names (Bella/Jasper/…) in `handlers.go`; the engine then resolves friendly names to internal `expr-voice-*` IDs via `ResolveVoiceName`. Unknown names pass through to let the engine resolve them directly.
+- **Voice names are mapped twice.** The server maps OpenAI names (alloy/echo/…) to KittenTTS names (Bella/Jasper/…) in `handlers.go`; the engine then resolves friendly names to internal `expr-voice-*` IDs via `ResolveVoiceName`. Unknown names pass through to let the engine resolve them directly. `ResolveVoiceName` checks the model's own `config.json` `voice_aliases` before the hardcoded table in `voices.go`, so a model directory can add or override names without a code change.
 - **Trailing silence is trimmed** — up to 5000 samples (the reference model's fixed cut), but never past the last audible sample plus a 50 ms decay margin, with a 10 ms fade at the cut: the reference's fixed cut lands mid-decay and chops speech, worst for comma-terminated chunks which pad far less than 5000 (see `trimTrailingSilence` in `tts.go`). Chunking deliberately *preserves* terminal sentence punctuation so prosody isn't clipped (see `TestChunkTextKeepsSentencePunctuation` for the why).
 - **SSE streaming** requires `response_format: "pcm"`; it uses `ChunkTextStreaming` (small first chunk for fast time-to-first-audio) rather than `ChunkText`.
 
