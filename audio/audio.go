@@ -7,6 +7,7 @@ package audio
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 )
@@ -53,13 +54,20 @@ func Formats() []string {
 	return names
 }
 
-// floatToI16 converts a float32 sample in [-1, 1] to a clamped 16-bit integer.
+// floatToI16 converts a float32 sample in [-1, 1] to a rounded, clamped 16-bit
+// integer. NaN — e.g. from a division by zero upstream, or from feeding an
+// unsanitized sample straight through — is treated as silence rather than
+// left to reach the float-to-int conversion, whose result Go leaves
+// implementation-defined for NaN.
 func floatToI16(s float32) int16 {
-	v := s * 32767.0
+	if math.IsNaN(float64(s)) {
+		return 0
+	}
+	v := math.Round(float64(s) * 32767.0)
 	switch {
-	case v > 32767.0:
+	case v > 32767:
 		return 32767
-	case v < -32768.0:
+	case v < -32768:
 		return -32768
 	default:
 		return int16(v)

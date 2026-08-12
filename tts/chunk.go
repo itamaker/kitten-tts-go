@@ -106,11 +106,14 @@ func ChunkTextStreaming(text string, firstMax, restMax int) []string {
 	return chunks
 }
 
-// indexAfterDelim returns the split position just past a delimiter's punctuation
-// character, or -1 if the delimiter is absent.
+// indexAfterDelim returns the split position just past a delimiter's
+// punctuation, or -1 if the delimiter is absent. This is not simply pos+1: for
+// multi-byte or padded delimiters like " — " and " - ", +1 would land just
+// past the leading space, leaving the dash as the first character of the next
+// chunk instead of ending this one.
 func indexAfterDelim(region, delim string) int {
 	if pos := strings.Index(region, delim); pos >= 0 {
-		return pos + 1
+		return pos + len(strings.TrimRight(delim, " "))
 	}
 	return -1
 }

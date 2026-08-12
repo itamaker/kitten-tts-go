@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -89,8 +90,8 @@ func (s *server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "'input' must not be empty")
 		return
 	}
-	if req.Speed < 0.25 || req.Speed > 4.0 {
-		writeError(w, http.StatusBadRequest, "'speed' must be between 0.25 and 4.0")
+	if err := tts.ValidateSpeed(req.Speed); err != nil {
+		writeError(w, http.StatusBadRequest, "'speed' "+err.Error())
 		return
 	}
 
@@ -109,21 +110,27 @@ func (s *server) handleSpeech(w http.ResponseWriter, r *http.Request) {
 		voice, enc.Name(), req.Speed, len(req.Input), req.Stream)
 
 	if req.Stream {
-		s.speechStream(w, req.Input, voice, req.Speed)
+		s.speechStream(r.Context(), w, req.Input, voice, req.Speed)
 	} else {
-		s.speechFull(w, req.Input, voice, req.Speed, enc)
+		s.speechFull(r.Context(), w, req.Input, voice, req.Speed, enc)
 	}
 }
 
-// speechFull synthesizes the whole input and returns it in the requested format.
-func (s *server) speechFull(w http.ResponseWriter, input, voice string, speed float32, enc audio.Encoder) {
+// speechFull synthesizes the whole input and returns it in the requested
+// format. ctx is the request context, so a client that disconnects mid-request
+// stops occupying the shared model rather than running to completion unread.
+func (s *server) speechFull(ctx context.Context, w http.ResponseWriter, input, voice string, speed float32, enc audio.Encoder) {
 	s.mu.Lock()
-	samples, err := s.model.Generate(input, voice, speed, true)
+	samples, err := s.model.GenerateContext(ctx, input, voice, speed, true)
 	s.mu.Unlock()
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, tts.ErrUnknownVoice) {
 			status = http.StatusBadRequest
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// Client is gone; nothing left to write to.
+			return
 		}
 		writeError(w, status, err.Error())
 		return
@@ -139,8 +146,10 @@ func (s *server) speechFull(w http.ResponseWriter, input, voice string, speed fl
 	w.Write(data)
 }
 
-// speechStream synthesizes chunk-by-chunk and emits each as an SSE event.
-func (s *server) speechStream(w http.ResponseWriter, input, voice string, speed float32) {
+// speechStream synthesizes chunk-by-chunk and emits each as an SSE event. ctx
+// is the request context: it's checked before each chunk so a disconnected
+// client stops the stream instead of synthesizing chunks nobody will read.
+func (s *server) speechStream(ctx context.Context, w http.ResponseWriter, input, voice string, speed float32) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, http.StatusInternalServerError, "streaming unsupported by server")
@@ -164,13 +173,21 @@ func (s *server) speechStream(w http.ResponseWriter, input, voice string, speed 
 	log.Printf("streaming %d chunks", len(chunks))
 
 	for i, chunk := range chunks {
+		if ctx.Err() != nil {
+			log.Printf("client disconnected before chunk %d", i)
+			return
+		}
+
 		// Lock per chunk (not for the whole stream) so other requests can
 		// interleave with a long-running stream; the session itself is the
 		// only shared state.
 		s.mu.Lock()
-		samples, err := s.model.GenerateChunk(chunk, voice, speed)
+		samples, err := s.model.GenerateChunkContext(ctx, chunk, voice, speed)
 		s.mu.Unlock()
 		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
 			sendEvent(map[string]any{
 				"type":  "error",
 				"error": map[string]any{"message": err.Error()},

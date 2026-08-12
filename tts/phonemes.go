@@ -1,25 +1,53 @@
 package tts
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 )
 
-// ESpeak is a [Phonemizer] backed by the espeak-ng command-line tool. The zero
-// value works, defaulting to the "espeak-ng" binary on PATH and the "en-us"
-// voice.
+// DefaultESpeakTimeout bounds how long the espeak-ng subprocess may run when
+// an [ESpeak] doesn't set Timeout. It applies even to calls made through
+// [ESpeak.Phonemize] or via a context with no deadline (e.g.
+// [context.Background]), so a wedged or hung espeak-ng process can never
+// block a caller — or, on the server, the shared model mutex — forever.
+const DefaultESpeakTimeout = 30 * time.Second
+
+// ESpeak is a [Phonemizer] (and [ContextPhonemizer]) backed by the espeak-ng
+// command-line tool. The zero value works, defaulting to the "espeak-ng"
+// binary on PATH, the "en-us" voice, and [DefaultESpeakTimeout].
 type ESpeak struct {
 	// Voice is the espeak-ng voice (e.g. "en-us"). Empty means "en-us".
 	Voice string
 	// Binary is the path to espeak-ng. Empty means "espeak-ng" (found on PATH).
 	Binary string
+	// Timeout bounds how long the espeak-ng subprocess may run before it is
+	// killed. Zero means [DefaultESpeakTimeout].
+	Timeout time.Duration
 }
 
-// Phonemize converts English text to an IPA phoneme string via espeak-ng.
+// Phonemize converts English text to an IPA phoneme string via espeak-ng,
+// bounded by [ESpeak.Timeout] (or [DefaultESpeakTimeout]).
 func (e *ESpeak) Phonemize(text string) (string, error) {
+	return e.PhonemizeContext(context.Background(), text)
+}
+
+// PhonemizeContext is [ESpeak.Phonemize] with cancellation. The subprocess is
+// killed when ctx is done or when the timeout elapses, whichever comes first —
+// so passing a context with no deadline still leaves the call bounded by the
+// timeout.
+func (e *ESpeak) PhonemizeContext(ctx context.Context, text string) (string, error) {
+	timeout := e.Timeout
+	if timeout <= 0 {
+		timeout = DefaultESpeakTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	bin := e.Binary
 	if bin == "" {
 		bin = "espeak-ng"
@@ -29,7 +57,7 @@ func (e *ESpeak) Phonemize(text string) (string, error) {
 		voice = "en-us"
 	}
 
-	out, err := exec.Command(bin,
+	out, err := exec.CommandContext(ctx, bin,
 		"--ipa", "-q",
 		"--sep=", // no separator between phonemes within a word
 		"-v", voice,
@@ -37,6 +65,9 @@ func (e *ESpeak) Phonemize(text string) (string, error) {
 		text,
 	).Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("espeak-ng did not finish within %s: %w", timeout, ctx.Err())
+		}
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
 			return "", fmt.Errorf("espeak-ng failed: %s", strings.TrimSpace(string(exit.Stderr)))

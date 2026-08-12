@@ -2,11 +2,14 @@ package tts
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNumberToWords(t *testing.T) {
@@ -119,6 +122,128 @@ func TestChunkTextAppendsCommaWhenUnpunctuated(t *testing.T) {
 	chunks := ChunkText("just some words", 400)
 	if len(chunks) != 1 || !strings.HasSuffix(chunks[0], ",") {
 		t.Fatalf("got %q, want a single comma-terminated chunk", chunks)
+	}
+}
+
+// TestIndexAfterDelimDash is a regression test for a bug in indexAfterDelim:
+// pos+1 is correct for a single-byte delimiter like ", " (splits just past
+// the comma), but " — " and " - " are multi-byte/padded, so pos+1 used to
+// land just past the leading *space*, leaving the dash as the first
+// character of the next chunk instead of the last character of this one.
+func TestIndexAfterDelimDash(t *testing.T) {
+	cases := []struct {
+		region, delim, wantPrefix string
+	}{
+		{"hello — world", " — ", "hello —"}, // multi-byte delimiter
+		{"hello - world", " - ", "hello -"}, // padded single-byte delimiter
+		{"hello, world", ", ", "hello,"},    // unpadded: pos+1 was already correct
+	}
+	for _, c := range cases {
+		got := indexAfterDelim(c.region, c.delim)
+		if got < 0 {
+			t.Fatalf("indexAfterDelim(%q, %q) = -1, want a split point", c.region, c.delim)
+		}
+		if prefix := c.region[:got]; prefix != c.wantPrefix {
+			t.Errorf("indexAfterDelim(%q, %q): region[:%d] = %q, want %q",
+				c.region, c.delim, got, prefix, c.wantPrefix)
+		}
+	}
+}
+
+// TestChunkTextStreamingKeepsDashWithFirstChunk is the end-to-end version of
+// TestIndexAfterDelimDash: it drives the bug through ChunkTextStreaming's
+// public API rather than calling the unexported helper directly.
+func TestChunkTextStreamingKeepsDashWithFirstChunk(t *testing.T) {
+	const intro = "Intro — "
+	text := intro + strings.Repeat("word ", 100)
+	chunks := ChunkTextStreaming(text, len(intro), 400)
+	if len(chunks) < 2 {
+		t.Fatalf("expected a split, got %d chunk(s): %q", len(chunks), chunks)
+	}
+	if !strings.Contains(chunks[0], "—") {
+		t.Errorf("chunks[0] = %q, want it to contain the dash", chunks[0])
+	}
+	if strings.HasPrefix(strings.TrimSpace(chunks[1]), "—") {
+		t.Errorf("chunks[1] = %q, starts with the dash (should have ended chunks[0])", chunks[1])
+	}
+}
+
+// TestValidateSpeed exercises the bounds the CLI and server both defer to, so
+// they can't silently drift apart.
+func TestValidateSpeed(t *testing.T) {
+	for _, s := range []float32{MinSpeed, 1.0, MaxSpeed} {
+		if err := ValidateSpeed(s); err != nil {
+			t.Errorf("ValidateSpeed(%v) = %v, want nil", s, err)
+		}
+	}
+	for _, s := range []float32{0, MinSpeed - 0.01, MaxSpeed + 0.01, -1} {
+		if err := ValidateSpeed(s); err == nil {
+			t.Errorf("ValidateSpeed(%v) = nil, want an error", s)
+		}
+	}
+}
+
+// slowPhonemizer implements both Phonemizer and ContextPhonemizer with an
+// artificial delay, so tests can drive GenerateContext's cancellation path
+// without espeak-ng or a loaded model.
+type slowPhonemizer struct{ delay time.Duration }
+
+func (p *slowPhonemizer) Phonemize(text string) (string, error) {
+	time.Sleep(p.delay)
+	return text, nil
+}
+
+func (p *slowPhonemizer) PhonemizeContext(ctx context.Context, text string) (string, error) {
+	select {
+	case <-time.After(p.delay):
+		return text, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// TestGenerateChunkContextCancellation is the regression test for the
+// deadlock this session's B1/B2 fix closes: a hung phonemizer used to be able
+// to block a caller (and, on the server, the shared model mutex) forever.
+// ResolveVoiceName and the speed-prior lookup both tolerate a Model with no
+// loaded net/voices (nil aliases/speedPriors/voices resolve through the
+// hardcoded voice table and empty-map reads), so GenerateChunkContext reaches
+// PhonemizeContext — where cancellation is actually exercised — without
+// needing a real model.
+func TestGenerateChunkContextCancellation(t *testing.T) {
+	m := &Model{phonemizer: &slowPhonemizer{delay: 10 * time.Second}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := m.GenerateChunkContext(ctx, "hello,", "Bruno", 1.0)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want context.DeadlineExceeded", err)
+	}
+	// Generous upper bound: in a working implementation this returns within
+	// the 50ms deadline. A regression back to the old unbounded Phonemize
+	// call would instead block for the full 10s delay.
+	if elapsed > 2*time.Second {
+		t.Errorf("GenerateChunkContext took %v to return after a 50ms deadline "+
+			"(want ~50ms); cancellation isn't propagating", elapsed)
+	}
+}
+
+// TestGenerateChunkContextFallsBackToPlainPhonemizer confirms a Phonemizer
+// that does *not* implement ContextPhonemizer still works through
+// GenerateChunkContext, via the fallback to plain Phonemize.
+func TestGenerateChunkContextFallsBackToPlainPhonemizer(t *testing.T) {
+	m := &Model{phonemizer: &fakePhonemizer{}}
+	_, err := m.GenerateChunkContext(context.Background(), "hello", "Bruno", 1.0)
+	// This Model has no loaded voices, so the call fails at the voice-table
+	// lookup that runs right after phonemization — reaching that error (and
+	// not some phonemizer-shaped error) is exactly what proves phonemization
+	// itself already succeeded via the fallback.
+	if !errors.Is(err, ErrUnknownVoice) {
+		t.Fatalf("err = %v, want ErrUnknownVoice (proves phonemize succeeded via the Phonemize fallback)", err)
 	}
 }
 

@@ -59,18 +59,30 @@ const (
 )
 
 // network wraps a loaded ONNX session and the resolved role of each input.
+//
+// styleT and speedT are reused across infer calls: their shape doesn't depend
+// on the input text (unlike the token tensor, which does and is rebuilt every
+// call), so infer overwrites their backing data in place via GetData rather
+// than allocating a fresh ORT tensor per chunk. This relies on network being
+// used by one goroutine at a time, which is already required — see [Model].
 type network struct {
 	session *ort.DynamicAdvancedSession
 	roles   []inputRole
 	outputs int
+
+	styleT *ort.Tensor[float32] // shape [1, styleCols]; reallocated if styleCols changes
+	speedT *ort.Tensor[float32] // shape [1]; allocated once
 }
 
-func loadNetwork(path string) (*network, error) {
+// loadNetwork loads the ONNX model at path. intraOpThreads sets the intra-op
+// thread count for the real inference session (0 lets onnxruntime pick its
+// own default; see [WithIntraOpThreads]).
+func loadNetwork(path string, intraOpThreads int) (*network, error) {
 	if err := initRuntime(); err != nil {
 		return nil, fmt.Errorf("tts: onnx runtime unavailable: %w", err)
 	}
 
-	inInfo, outInfo, err := ort.GetInputOutputInfo(path)
+	inInfo, outInfo, err := readInputOutputInfo(path)
 	if err != nil {
 		return nil, fmt.Errorf("tts: reading model I/O: %w", err)
 	}
@@ -96,11 +108,73 @@ func loadNetwork(path string) (*network, error) {
 		outNames[i] = info.Name
 	}
 
-	session, err := ort.NewDynamicAdvancedSession(path, inNames, outNames, nil)
+	sessOpts, err := ort.NewSessionOptions()
+	if err != nil {
+		return nil, fmt.Errorf("tts: creating session options: %w", err)
+	}
+	defer sessOpts.Destroy() // the session copies what it needs; safe to free right after NewDynamicAdvancedSession returns.
+
+	if err := sessOpts.SetIntraOpNumThreads(intraOpThreads); err != nil {
+		return nil, fmt.Errorf("tts: setting intra-op threads: %w", err)
+	}
+	// Ops in this graph run one after another rather than as independent
+	// parallel subgraphs, so a second thread pool for inter-op parallelism
+	// would sit idle; keep it at 1 rather than paying for threads that never
+	// get used.
+	if err := sessOpts.SetInterOpNumThreads(1); err != nil {
+		return nil, fmt.Errorf("tts: setting inter-op threads: %w", err)
+	}
+	if err := sessOpts.SetGraphOptimizationLevel(ort.GraphOptimizationLevelEnableAll); err != nil {
+		return nil, fmt.Errorf("tts: setting graph optimization level: %w", err)
+	}
+	if err := sessOpts.SetCpuMemArena(true); err != nil {
+		return nil, fmt.Errorf("tts: enabling CPU memory arena: %w", err)
+	}
+	if err := sessOpts.SetMemPattern(true); err != nil {
+		return nil, fmt.Errorf("tts: enabling memory pattern optimization: %w", err)
+	}
+
+	session, err := ort.NewDynamicAdvancedSession(path, inNames, outNames, sessOpts)
 	if err != nil {
 		return nil, fmt.Errorf("tts: loading model: %w", err)
 	}
 	return &network{session: session, roles: roles, outputs: len(outNames)}, nil
+}
+
+// readInputOutputInfo reads a model's input/output names, types, and shapes.
+//
+// ort.GetInputOutputInfo does this by building a full, default-configured
+// OrtSession — which parses and graph-optimizes the model and allocates its
+// weights — purely to read metadata off it before discarding it, immediately
+// ahead of loadNetwork building the real session from the same file. The
+// binding exposes no cheaper way to read this metadata, so the extra pass is
+// structural; configuring this throwaway session to skip optimization, extra
+// threads, and memory-arena setup at least avoids doing unnecessary work for
+// output nobody keeps. Measured on the nano-int8 model, this did not produce
+// a clear load-time win — parsing and materializing the model's weights
+// appears to dominate over graph optimization for a model this size — so
+// treat this as a structural cleanup rather than a proven speedup.
+func readInputOutputInfo(path string) ([]ort.InputOutputInfo, []ort.InputOutputInfo, error) {
+	opts, err := ort.NewSessionOptions()
+	if err != nil {
+		return nil, nil, fmt.Errorf("creating options: %w", err)
+	}
+	defer opts.Destroy()
+
+	if err := opts.SetGraphOptimizationLevel(ort.GraphOptimizationLevelDisableAll); err != nil {
+		return nil, nil, fmt.Errorf("disabling graph optimization: %w", err)
+	}
+	if err := opts.SetIntraOpNumThreads(1); err != nil {
+		return nil, nil, fmt.Errorf("setting thread count: %w", err)
+	}
+	if err := opts.SetCpuMemArena(false); err != nil {
+		return nil, nil, fmt.Errorf("disabling memory arena: %w", err)
+	}
+	if err := opts.SetMemPattern(false); err != nil {
+		return nil, nil, fmt.Errorf("disabling memory pattern optimization: %w", err)
+	}
+
+	return ort.GetInputOutputInfoWithOptions(path, opts)
 }
 
 // infer runs the model and returns the first output as f32 samples.
@@ -111,17 +185,15 @@ func (n *network) infer(tokens []int64, style []float32, styleCols int, speed fl
 	}
 	defer idsT.Destroy()
 
-	styleT, err := ort.NewTensor(ort.NewShape(1, int64(styleCols)), style)
+	styleT, err := n.styleTensor(style, styleCols)
 	if err != nil {
 		return nil, err
 	}
-	defer styleT.Destroy()
 
-	speedT, err := ort.NewTensor(ort.NewShape(1), []float32{speed})
+	speedT, err := n.speedTensor(speed)
 	if err != nil {
 		return nil, err
 	}
-	defer speedT.Destroy()
 
 	inputs := make([]ort.Value, len(n.roles))
 	for i, role := range n.roles {
@@ -157,7 +229,47 @@ func (n *network) infer(tokens []int64, style []float32, styleCols int, speed fl
 	return audio, nil
 }
 
+// styleTensor returns n's cached style tensor, overwriting its contents with
+// style. It (re)allocates only on the first call or if styleCols changes from
+// a previous call — every voice in a given model is expected to share one
+// embedding size, so in practice this allocates at most once per network.
+func (n *network) styleTensor(style []float32, styleCols int) (*ort.Tensor[float32], error) {
+	if n.styleT == nil || len(n.styleT.GetData()) != styleCols {
+		if n.styleT != nil {
+			n.styleT.Destroy()
+			n.styleT = nil
+		}
+		t, err := ort.NewTensor(ort.NewShape(1, int64(styleCols)), make([]float32, styleCols))
+		if err != nil {
+			return nil, err
+		}
+		n.styleT = t
+	}
+	copy(n.styleT.GetData(), style)
+	return n.styleT, nil
+}
+
+// speedTensor returns n's cached, always-[1]-shaped speed tensor, overwriting
+// its single value with speed.
+func (n *network) speedTensor(speed float32) (*ort.Tensor[float32], error) {
+	if n.speedT == nil {
+		t, err := ort.NewTensor(ort.NewShape(1), make([]float32, 1))
+		if err != nil {
+			return nil, err
+		}
+		n.speedT = t
+	}
+	n.speedT.GetData()[0] = speed
+	return n.speedT, nil
+}
+
 func (n *network) close() error {
+	if n.styleT != nil {
+		n.styleT.Destroy()
+	}
+	if n.speedT != nil {
+		n.speedT.Destroy()
+	}
 	if n.session != nil {
 		return n.session.Destroy()
 	}

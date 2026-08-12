@@ -45,12 +45,12 @@ func New(dir string, opts ...Option) (*Model, error) {
 }
 
 func load(modelPath, voicesPath string, priors map[string]float32, aliases map[string]string, opts []Option) (*Model, error) {
-	o := options{phonemizer: defaultPhonemizer()}
+	o := options{phonemizer: defaultPhonemizer(), intraOpThreads: DefaultIntraOpThreads}
 	for _, opt := range opts {
 		opt(&o)
 	}
 
-	net, err := loadNetwork(modelPath)
+	net, err := loadNetwork(modelPath, o.intraOpThreads)
 	if err != nil {
 		return nil, err
 	}

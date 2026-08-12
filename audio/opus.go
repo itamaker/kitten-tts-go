@@ -36,6 +36,14 @@ func encodeOpus(samples []float32) ([]byte, error) {
 		opusRate  = 48000
 		frameSize = 960 // 20 ms at 48 kHz
 		serial    = uint32(1)
+		// preSkip is libopus's typical total algorithmic delay at 48 kHz for
+		// the encoder settings used here. hraban/opus does not expose
+		// OPUS_GET_LOOKAHEAD to read the encoder's actual value, so this is
+		// hardcoded rather than queried. Without it (pre-skip 0), a decoder
+		// presents the encoder's priming delay as real audio, so playback
+		// starts ~6.5 ms late and is not sample-aligned with the other
+		// formats (RFC 7845 §4.2).
+		preSkip = 312
 	)
 
 	samples48k := Resample(samples, SampleRate, opusRate)
@@ -53,7 +61,7 @@ func encodeOpus(samples []float32) ([]byte, error) {
 	head = append(head, []byte("OpusHead")...)
 	head = append(head, 1)                                  // version
 	head = append(head, 1)                                  // channel count (mono)
-	head = binary.LittleEndian.AppendUint16(head, 0)        // pre-skip
+	head = binary.LittleEndian.AppendUint16(head, preSkip)  // pre-skip
 	head = binary.LittleEndian.AppendUint32(head, opusRate) // input sample rate
 	head = binary.LittleEndian.AppendUint16(head, 0)        // output gain
 	head = append(head, 0)                                  // channel mapping family 0
@@ -72,7 +80,7 @@ func encodeOpus(samples []float32) ([]byte, error) {
 
 	// Encode audio in 20 ms frames, batching opus packets into OGG pages.
 	opusOut := make([]byte, 4000)
-	var granule int64 // cumulative 48 kHz sample count
+	var fed int64 // cumulative real (non-padding) 48 kHz samples fed, capped at len(samples48k)
 	var pageSegs []byte
 	var pageBody []byte
 	var pageGranule int64
@@ -101,10 +109,14 @@ func encodeOpus(samples []float32) ([]byte, error) {
 			return nil, fmt.Errorf("opus encode error: %w", err)
 		}
 		packet := opusOut[:n]
-		// The final frame is zero-padded to frameSize; the granule position
-		// must count only real samples so players trim the padding (RFC 7845
-		// §4.5 end trimming).
-		granule = min(granule+frameSize, int64(len(samples48k)))
+		// The final frame is zero-padded to frameSize; cap at the real sample
+		// count so players trim the padding (RFC 7845 §4.5 end trimming).
+		fed = min(fed+frameSize, int64(len(samples48k)))
+		// Granule position is a decoder-output sample count from the very
+		// start of the stream, before pre-skip discarding — so it always
+		// includes preSkip, even though a compliant player then discards
+		// that many samples from the front (RFC 7845 §4.5).
+		granule := preSkip + fed
 
 		segs := lacingValues(len(packet))
 		// A page holds at most 255 segments; flush before overflowing.
@@ -138,31 +150,61 @@ func writeOggPage(buf *bytes.Buffer, headerType byte, granule int64, serial, seq
 }
 
 // writeOggPageRaw writes an OGG page given a precomputed segment table and the
-// concatenated packet bodies for that page.
+// concatenated packet bodies for that page, computing and patching in its CRC.
+//
+// The page is written straight into buf (rather than assembled in a separate
+// header buffer and appended) so framing an N-page stream costs one copy of
+// each page's bytes into buf, not two.
 func writeOggPageRaw(buf *bytes.Buffer, headerType byte, granule int64, serial, seq uint32, segTable, body []byte) {
-	var header bytes.Buffer
-	header.WriteString("OggS")
-	header.WriteByte(0) // stream structure version
-	header.WriteByte(headerType)
-	binary.Write(&header, binary.LittleEndian, granule)
-	binary.Write(&header, binary.LittleEndian, serial)
-	binary.Write(&header, binary.LittleEndian, seq)
-	binary.Write(&header, binary.LittleEndian, uint32(0)) // CRC placeholder
-	header.WriteByte(byte(len(segTable)))
-	header.Write(segTable)
+	pageStart := buf.Len()
 
-	page := append(header.Bytes(), body...)
+	buf.WriteString("OggS")
+	buf.WriteByte(0) // stream structure version
+	buf.WriteByte(headerType)
+	binary.Write(buf, binary.LittleEndian, granule)
+	binary.Write(buf, binary.LittleEndian, serial)
+	binary.Write(buf, binary.LittleEndian, seq)
+	binary.Write(buf, binary.LittleEndian, uint32(0)) // CRC placeholder, patched below
+	buf.WriteByte(byte(len(segTable)))
+	buf.Write(segTable)
+	buf.Write(body)
 
-	// Compute CRC over the full page with the CRC field zeroed, then patch it in.
+	// CRC covers the whole page with the CRC field zeroed (as just written
+	// above); page is a view into buf's own backing array, so this reads what
+	// was just written and then patches it in place — no separate assembly.
+	page := buf.Bytes()[pageStart:]
 	crc := oggCRC(page)
 	binary.LittleEndian.PutUint32(page[22:26], crc)
-
-	buf.Write(page)
 }
 
+// oggCRCTable is oggCRCSlow's per-byte result table: processing byte i as the
+// top byte of an otherwise-zero register through the same 8 shift/xor steps.
+// Precomputing it once turns oggCRC's per-byte cost from 8 conditional
+// shifts into one table lookup, which matters here because it runs over
+// every byte of every OGG page written.
+var oggCRCTable = func() (t [256]uint32) {
+	for i := range t {
+		t[i] = oggCRCSlow([]byte{byte(i)})
+	}
+	return t
+}()
+
 // oggCRC computes the OGG page CRC: CRC-32 with polynomial 0x04c11db7,
-// initial value 0, no input/output reflection, no final XOR.
+// initial value 0, no input/output reflection, no final XOR. Equivalent to
+// (and cross-checked in tests against) the direct bit-by-bit definition in
+// oggCRCSlow, using the standard table-driven transform of that recurrence.
 func oggCRC(data []byte) uint32 {
+	var crc uint32
+	for _, b := range data {
+		crc = (crc << 8) ^ oggCRCTable[byte(crc>>24)^b]
+	}
+	return crc
+}
+
+// oggCRCSlow is the direct, unoptimized definition of the OGG page CRC (see
+// oggCRC): 8 conditional shift-xors per byte, no table. Kept only as the
+// reference oggCRCTable is built from and is cross-checked against in tests.
+func oggCRCSlow(data []byte) uint32 {
 	var crc uint32
 	for _, b := range data {
 		crc ^= uint32(b) << 24
